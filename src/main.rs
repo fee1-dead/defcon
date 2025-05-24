@@ -1,20 +1,38 @@
-use std::collections::HashMap;
 use std::error::Error;
 
 use chrono::{prelude::*, Duration};
 use config;
+use futures_util::TryStreamExt;
 use lazy_static::lazy_static;
-use mediawiki::{
-    api::Api,
-    page::Page,
-    title::Title,
-};
-use regex::Regex;
 
-static VANDALISM_KEYWORDS: [&str; 8] = ["revert", "rv ", "long-term abuse", "long term abuse",
-    "lta", "abuse", "rvv ", "undid"];
-static NOT_VANDALISM_KEYWORDS: [&str; 12] = ["uaa", "good faith", "agf", "unsourced",
-    "unreferenced", "self", "speculat", "original research", "rv tag", "typo", "incorrect", "format"];
+use mw::ua;
+use regex::Regex;
+use serde_json::Value;
+
+static VANDALISM_KEYWORDS: [&str; 8] = [
+    "revert",
+    "rv ",
+    "long-term abuse",
+    "long term abuse",
+    "lta",
+    "abuse",
+    "rvv ",
+    "undid",
+];
+static NOT_VANDALISM_KEYWORDS: [&str; 12] = [
+    "uaa",
+    "good faith",
+    "agf",
+    "unsourced",
+    "unreferenced",
+    "self",
+    "speculat",
+    "original research",
+    "rv tag",
+    "typo",
+    "incorrect",
+    "format",
+];
 static ISO_8601_FMT: &str = "%Y-%m-%dT%H:%M:%SZ";
 static INTERVAL_IN_MINS: i64 = 60;
 
@@ -23,12 +41,9 @@ lazy_static! {
     static ref LEVEL_RE: Regex = Regex::new(r"level\s*=\s*(\d+)").unwrap();
 }
 
-fn make_map(params: &[(&str, &str)]) -> HashMap<String, String> {
-    params.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
-}
-
 fn is_revert_of_vandalism(edit_summary: &str) -> bool {
-    let edit_summary = SECTION_HEADER_RE.replace(edit_summary, "")
+    let edit_summary = SECTION_HEADER_RE
+        .replace(edit_summary, "")
         .to_ascii_lowercase();
     for not_vand_kwd in NOT_VANDALISM_KEYWORDS.iter() {
         if edit_summary.contains(not_vand_kwd) {
@@ -45,25 +60,41 @@ fn is_revert_of_vandalism(edit_summary: &str) -> bool {
     false
 }
 
-async fn reverts_per_minute(api: &Api) -> Result<f32, Box<dyn Error>> {
+async fn reverts_per_minute(client: &mw::Client) -> Result<f32, Box<dyn Error>> {
     let time_one_interval_ago = Utc::now() - Duration::minutes(INTERVAL_IN_MINS);
     let end_str = time_one_interval_ago.format(ISO_8601_FMT).to_string();
-    let query = make_map(&[
+    let query = [
         ("action", "query"),
         ("list", "recentchanges"),
         ("rctype", "edit"),
         ("rcstart", &Utc::now().format(ISO_8601_FMT).to_string()),
         ("rcend", &end_str),
         ("rcprop", "comment"),
-        ("rclimit", "100"),
-    ]);
-    let res = api.get_query_api_json_all(&query).await?;
-    let num_reverts = res["query"]["recentchanges"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter(|edit| edit["comment"].as_str().map_or(false, is_revert_of_vandalism))
-        .count();
+        ("rclimit", "max"),
+    ];
+    #[derive(serde::Deserialize)]
+    struct Edit {
+        comment: String,
+    }
+    #[derive(serde::Deserialize)]
+    struct RecentChanges {
+        recentchanges: Vec<Edit>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Res {
+        query: RecentChanges,
+    }
+    let num_reverts = client
+        .get_all(query, |res: Res| {
+            Ok(vec![res
+                .query
+                .recentchanges
+                .iter()
+                .filter(|edit| is_revert_of_vandalism(&edit.comment))
+                .count()])
+        })
+        .try_fold(0, |x, y| async move { Ok(x + y) })
+        .await?;
     Ok((num_reverts as f32) / (INTERVAL_IN_MINS as f32))
 }
 
@@ -87,36 +118,60 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .add_source(config::File::with_name("settings"))
         .add_source(config::Environment::with_prefix("APP"))
         .build()?;
-    let username = config.get_string("username")?;
-    let password = config.get_string("password")?;
+    let oauth_token = config.get_string("oauth_token")?;
 
-    let mut api = Api::new("https://en.wikipedia.org/w/api.php").await?;
-    api.login(username, password).await?;
-
-    api.set_user_agent(format!("EnterpriseyBot/defcon-rs/{} (https://en.wikipedia.org/wiki/User:EnterpriseyBot; apersonwiki@gmail.com)", env!("CARGO_PKG_VERSION")));
+    let (client, _) = mw::ClientBuilder::new("https://en.wikipedia.org/w/api.php").user_agent(
+        ua!(concat!("DeadbeefBot/defcon-rs/", env!("CARGO_PKG_VERSION"), " (https://en.wikipedia.org/wiki/User:DeadbeefBot)"))
+    ).login_oauth(&oauth_token).await?;
 
     // get current on-wiki defcon level
     let report_page = config.get_string("report_page")?;
-    let mut page = Page::new(Title::new_from_full(&report_page, &api));
-    let curr_text = page.text(&api).await?;
-    let curr_level = if let Some(captures) = LEVEL_RE.captures(&curr_text) {
+    
+    let q = [
+        ("action", "query"),
+        ("prop", "revisions"),
+        ("titles", &report_page),
+        ("rvprop", "content"),
+        ("rvslots", "main"),
+        ("rvlimit", "1"),
+    ];
+    let res = client.get(q).send().await?.error_for_status()?.json::<Value>().await?;
+    let rev = &res["query"]["pages"][0]["revisions"][0];
+    let revid = rev["revid"].as_u64().unwrap();
+    let curr_text = rev["slots"]["main"]["content"].as_str().unwrap();
+    
+    let curr_level = if let Some(captures) = LEVEL_RE.captures(curr_text) {
         captures.get(1).unwrap().as_str().parse::<u8>().unwrap()
     } else {
         0
     };
 
     // compute current defcon level
-    let rpm = reverts_per_minute(&api).await?;
+    let rpm = reverts_per_minute(&client).await?;
     let level = rpm_to_level(rpm);
 
     if curr_level != level {
-        let text = format!("{{{{#switch: {{{{{{1}}}}}}
+        let text = format!(
+            "{{{{#switch: {{{{{{1}}}}}}
               | level = {}
               | sign = ~~~~~
               | info = {:.2} RPM according to [[User:EnterpriseyBot|EnterpriseyBot]]
-            }}}}", level, rpm);
+            }}}}",
+            level, rpm
+        );
+        // todo update
         let summary = format!("[[Wikipedia:Bots/Requests for approval/APersonBot 5|Bot]] updating vandalism level to level {0} ({1:.2} RPM) #DEFCON{0}", level, rpm);
-        page.edit_text(&mut api, text, summary).await?;
+        let token = client.get_token("csrf").await?;
+        let q = [
+            ("action", "edit"),
+            ("title", &report_page),
+            ("summary", &summary),
+            ("text", &text),
+            ("baserevid", &format!("{revid}")),
+            ("token", &token),
+        ];
+
+        client.post(q).send().await?.error_for_status()?;
     } else {
         // No edit necessary
     }
