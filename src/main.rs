@@ -160,7 +160,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             level, rpm
         );
         // todo update
-        let summary = format!("[[Wikipedia:Bots/Requests for approval/APersonBot 5|Bot]] updating vandalism level to level {0} ({1:.2} RPM) #DEFCON{0}", level, rpm);
+        let summary = format!("[[Wikipedia:Bots/Requests for approval/DeadbeefBot 4|Bot]] updating vandalism level to level {0} ({1:.2} RPM) #DEFCON{0}", level, rpm);
         let token = client.get_token("csrf").await?;
         let q = [
             ("action", "edit"),
