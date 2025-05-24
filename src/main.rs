@@ -33,8 +33,7 @@ static NOT_VANDALISM_KEYWORDS: [&str; 12] = [
     "incorrect",
     "format",
 ];
-static ISO_8601_FMT: &str = "%Y-%m-%dT%H:%M:%SZ";
-static INTERVAL_IN_MINS: i64 = 60;
+const INTERVAL_IN_MINS: i64 = 60;
 
 lazy_static! {
     static ref SECTION_HEADER_RE: Regex = Regex::new(r"/\*[\s\S]+?\*/").unwrap();
@@ -45,29 +44,22 @@ fn is_revert_of_vandalism(edit_summary: &str) -> bool {
     let edit_summary = SECTION_HEADER_RE
         .replace(edit_summary, "")
         .to_ascii_lowercase();
-    for not_vand_kwd in NOT_VANDALISM_KEYWORDS.iter() {
-        if edit_summary.contains(not_vand_kwd) {
-            return false;
-        }
+
+    if NOT_VANDALISM_KEYWORDS.iter().any(|kwd| edit_summary.contains(kwd)) {
+        return false;
     }
 
-    for vand_kwd in VANDALISM_KEYWORDS.iter() {
-        if edit_summary.contains(vand_kwd) {
-            return true;
-        }
-    }
-
-    false
+    VANDALISM_KEYWORDS.iter().any(|kwd| edit_summary.contains(kwd))
 }
 
 async fn reverts_per_minute(client: &mw::Client) -> Result<f32, Box<dyn Error>> {
     let time_one_interval_ago = Utc::now() - Duration::minutes(INTERVAL_IN_MINS);
-    let end_str = time_one_interval_ago.format(ISO_8601_FMT).to_string();
+    let end_str = time_one_interval_ago.to_rfc3339_opts(SecondsFormat::Secs, true);
     let query = [
         ("action", "query"),
         ("list", "recentchanges"),
         ("rctype", "edit"),
-        ("rcstart", &Utc::now().format(ISO_8601_FMT).to_string()),
+        ("rcstart", &Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true)),
         ("rcend", &end_str),
         ("rcprop", "comment"),
         ("rclimit", "max"),
