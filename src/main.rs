@@ -83,12 +83,12 @@ fn rpm_to_level(rpm: f32) -> u8 {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    let mut config = config::Config::default();
-    config
-        .merge(config::File::with_name("settings"))?
-        .merge(config::Environment::with_prefix("APP"))?;
-    let username = config.get_str("username")?;
-    let password = config.get_str("password")?;
+    let config = config::Config::builder()
+        .add_source(config::File::with_name("settings"))
+        .add_source(config::Environment::with_prefix("APP"))
+        .build()?;
+    let username = config.get_string("username")?;
+    let password = config.get_string("password")?;
 
     let mut api = Api::new("https://en.wikipedia.org/w/api.php").await?;
     api.login(username, password).await?;
@@ -96,8 +96,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     api.set_user_agent(format!("EnterpriseyBot/defcon-rs/{} (https://en.wikipedia.org/wiki/User:EnterpriseyBot; apersonwiki@gmail.com)", env!("CARGO_PKG_VERSION")));
 
     // get current on-wiki defcon level
-    let report_page = config.get_str("report_page")?;
-    let page = Page::new(Title::new_from_full(&report_page, &api));
+    let report_page = config.get_string("report_page")?;
+    let mut page = Page::new(Title::new_from_full(&report_page, &api));
     let curr_text = page.text(&api).await?;
     let curr_level = if let Some(captures) = LEVEL_RE.captures(&curr_text) {
         captures.get(1).unwrap().as_str().parse::<u8>().unwrap()
