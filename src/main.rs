@@ -1,5 +1,3 @@
-use std::error::Error;
-
 use chrono::{prelude::*, Duration};
 use config;
 use futures_util::TryStreamExt;
@@ -8,6 +6,8 @@ use lazy_static::lazy_static;
 use mw::ua;
 use regex::Regex;
 use serde_json::Value;
+use tracing::info;
+use tracing_subscriber::EnvFilter;
 
 static VANDALISM_KEYWORDS: [&str; 8] = [
     "revert",
@@ -45,21 +45,29 @@ fn is_revert_of_vandalism(edit_summary: &str) -> bool {
         .replace(edit_summary, "")
         .to_ascii_lowercase();
 
-    if NOT_VANDALISM_KEYWORDS.iter().any(|kwd| edit_summary.contains(kwd)) {
+    if NOT_VANDALISM_KEYWORDS
+        .iter()
+        .any(|kwd| edit_summary.contains(kwd))
+    {
         return false;
     }
 
-    VANDALISM_KEYWORDS.iter().any(|kwd| edit_summary.contains(kwd))
+    VANDALISM_KEYWORDS
+        .iter()
+        .any(|kwd| edit_summary.contains(kwd))
 }
 
-async fn reverts_per_minute(client: &mw::Client) -> Result<f32, Box<dyn Error>> {
+async fn reverts_per_minute(client: &mw::Client) -> color_eyre::Result<f32> {
     let time_one_interval_ago = Utc::now() - Duration::minutes(INTERVAL_IN_MINS);
     let end_str = time_one_interval_ago.to_rfc3339_opts(SecondsFormat::Secs, true);
     let query = [
         ("action", "query"),
         ("list", "recentchanges"),
         ("rctype", "edit"),
-        ("rcstart", &Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true)),
+        (
+            "rcstart",
+            &Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
+        ),
         ("rcend", &end_str),
         ("rcprop", "comment"),
         ("rclimit", "max"),
@@ -105,33 +113,54 @@ fn rpm_to_level(rpm: f32) -> u8 {
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn Error>> {
+async fn main() -> color_eyre::Result<()> {
+    color_eyre::install()?;
+    tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::from_default_env())
+        .init();
+
+    let mut num_edits = std::fs::read_to_string("./num.txt").as_deref().unwrap_or("0").parse::<u64>()?;
+    if num_edits >= 50 {
+        info!("past trial limit; not going to edit");
+    }
+
     let config = config::Config::builder()
         .add_source(config::File::with_name("settings"))
         .add_source(config::Environment::with_prefix("APP"))
         .build()?;
     let oauth_token = config.get_string("oauth_token")?;
 
-    let (client, _) = mw::ClientBuilder::new("https://en.wikipedia.org/w/api.php").user_agent(
-        ua!(concat!("DeadbeefBot/defcon-rs/", env!("CARGO_PKG_VERSION"), " (https://en.wikipedia.org/wiki/User:DeadbeefBot)"))
-    ).login_oauth(&oauth_token).await?;
+    let (client, _) = mw::ClientBuilder::new("https://en.wikipedia.org/w/api.php")
+        .user_agent(ua!(concat!(
+            "DeadbeefBot/defcon-rs/",
+            env!("CARGO_PKG_VERSION"),
+            " (https://en.wikipedia.org/wiki/User:DeadbeefBot)"
+        )))
+        .login_oauth(&oauth_token)
+        .await?;
 
     // get current on-wiki defcon level
     let report_page = config.get_string("report_page")?;
-    
+
     let q = [
         ("action", "query"),
         ("prop", "revisions"),
         ("titles", &report_page),
-        ("rvprop", "content"),
+        ("rvprop", "ids|content"),
         ("rvslots", "main"),
         ("rvlimit", "1"),
     ];
-    let res = client.get(q).send().await?.error_for_status()?.json::<Value>().await?;
+    let res = client
+        .get(q)
+        .send()
+        .await?
+        .error_for_status()?
+        .json::<Value>()
+        .await?;
     let rev = &res["query"]["pages"][0]["revisions"][0];
     let revid = rev["revid"].as_u64().unwrap();
     let curr_text = rev["slots"]["main"]["content"].as_str().unwrap();
-    
+
     let curr_level = if let Some(captures) = LEVEL_RE.captures(curr_text) {
         captures.get(1).unwrap().as_str().parse::<u8>().unwrap()
     } else {
@@ -164,7 +193,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
         ];
 
         client.post(q).send().await?.error_for_status()?;
+        tracing::info!("edited");
+        num_edits += 1;
+        std::fs::write("./num.txt", &format!("{num_edits}"))?;
     } else {
+        tracing::info!("not going to edit")
         // No edit necessary
     }
     Ok(())
