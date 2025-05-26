@@ -1,5 +1,5 @@
 [package]
-name = "defcon-rs"
+name = "defcon"
 version = "0.2.0"
 authors = ["Enterprisey <apersonwiki@gmail.com>"]
 edition = "2018"
