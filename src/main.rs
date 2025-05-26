@@ -147,7 +147,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             "{{{{#switch: {{{{{{1}}}}}}
               | level = {}
               | sign = ~~~~~
-              | info = {:.2} RPM according to [[User:EnterpriseyBot|EnterpriseyBot]]
+              | info = {:.2} RPM according to [[User:DeadbeefBot|DeadbeefBot]]
             }}}}",
             level, rpm
         );
