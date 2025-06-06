@@ -119,11 +119,6 @@ async fn main() -> color_eyre::Result<()> {
         .with_env_filter(EnvFilter::from_default_env())
         .init();
 
-    let mut num_edits = std::fs::read_to_string("./num.txt").as_deref().unwrap_or("0").parse::<u64>()?;
-    if num_edits >= 50 {
-        info!("past trial limit; not going to edit");
-    }
-
     let config = config::Config::builder()
         .add_source(config::File::with_name("settings"))
         .add_source(config::Environment::with_prefix("APP"))
@@ -180,7 +175,6 @@ async fn main() -> color_eyre::Result<()> {
             }}}}",
             level, rpm
         );
-        // todo update
         let summary = format!("[[Wikipedia:Bots/Requests for approval/DeadbeefBot 4|Bot]] updating vandalism level to level {0} ({1:.2} RPM) #DEFCON{0}", level, rpm);
         let token = client.get_token("csrf").await?;
         let q = [
@@ -194,8 +188,6 @@ async fn main() -> color_eyre::Result<()> {
 
         client.post(q).send().await?.error_for_status()?;
         tracing::info!("edited");
-        num_edits += 1;
-        std::fs::write("./num.txt", &format!("{num_edits}"))?;
     } else {
         tracing::info!("not going to edit")
         // No edit necessary
